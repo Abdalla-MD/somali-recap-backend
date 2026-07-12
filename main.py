@@ -1,19 +1,25 @@
 """
-Somali Recap AI Studio — Phase 1 test backend.
+Somali Recap AI Studio — Phase 2A backend.
 
 Endpoints:
   GET  /health
-  POST /transcribe        (multipart video file -> transcript JSON)
-  POST /generate-script    (JSON {transcript} -> JSON {script})
+  POST /transcribe        (multipart video file -> {language, segments})
+  POST /generate-script    (JSON {segments} -> {segments} with somali_text)
   POST /synthesize-voice   (JSON {text, voice, speed, pitch} -> mp3 file)
+
+CHANGED for Phase 2A: /transcribe now returns timestamped segments
+(not flat text), and /generate-script takes those segments and
+returns the same list with somali_text + version/status fields added
+— this structured list is the Sync Engine's "source of truth" going
+forward (Scene Detection, Motion Analyzer, and Decision Engine all
+build on top of it in later steps).
 
 Run:
   pip install -r requirements.txt
-  cp .env.example .env   # then fill in GEMINI_API_KEY
+  cp .env.example .env   # then fill in GEMINI_API_KEY and GROQ_API_KEY
   uvicorn main:app --reload --host 0.0.0.0 --port 8000
 
-See README.md for how Flutter should reach this (10.0.2.2 for the
-Android emulator, or your machine's LAN IP for a physical device).
+See README.md for how Flutter should reach this.
 """
 import os
 import shutil
@@ -25,12 +31,12 @@ from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from services.transcription_service import transcribe
-from services.gemini_service import generate_somali_script
+from services.gemini_service import generate_somali_segments
 from services.tts_service import synthesize
 
 load_dotenv()
 
-app = FastAPI(title="Somali Recap AI Studio - Backend (Phase 1 test server)")
+app = FastAPI(title="Somali Recap AI Studio - Backend (Phase 2A)")
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -57,17 +63,24 @@ async def transcribe_endpoint(file: UploadFile = File(...)):
             os.remove(temp_path)
 
 
+class WhisperSegment(BaseModel):
+    start: float
+    end: float
+    text: str
+
+
 class ScriptRequest(BaseModel):
-    transcript: str
+    segments: list[WhisperSegment]
 
 
 @app.post("/generate-script")
 async def generate_script_endpoint(payload: ScriptRequest):
-    if not payload.transcript.strip():
-        return JSONResponse(status_code=400, content={"error": "transcript is required"})
+    if not payload.segments:
+        return JSONResponse(status_code=400, content={"error": "segments is required"})
     try:
-        script = generate_somali_script(payload.transcript)
-        return {"script": script}
+        segments_dict = [s.model_dump() for s in payload.segments]
+        result = generate_somali_segments(segments_dict)
+        return {"segments": result}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
 
