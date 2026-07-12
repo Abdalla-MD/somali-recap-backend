@@ -4,6 +4,7 @@ from Abdalla's original command:
   python -m edge_tts --voice so-SO-MuuseNeural --rate="+20%" --pitch="-10%" ...
 """
 import os
+import subprocess
 import uuid
 import edge_tts
 
@@ -14,6 +15,19 @@ VOICE_MAP = {
     "muuse": "so-SO-MuuseNeural",
     "ubax": "so-SO-UbaxNeural",
 }
+
+
+def get_audio_duration(path: str) -> float:
+    """Voice Duration Analyzer — ffprobe on a synthesized audio file.
+    Real duration, not an estimate."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(f"ffprobe failed on {path}: {result.stderr}")
+    return float(result.stdout.strip())
 
 
 def _format_percent(value: float) -> str:
