@@ -4,6 +4,7 @@ Somali Recap AI Studio — Phase 2A backend.
 Endpoints:
   GET  /health
   POST /transcribe        (multipart video file -> {language, segments})
+  POST /detect-scenes     (multipart video file -> {scenes})
   POST /generate-script    (JSON {segments} -> {segments} with somali_text)
   POST /synthesize-voice   (JSON {text, voice, speed, pitch} -> mp3 file)
 
@@ -11,8 +12,10 @@ CHANGED for Phase 2A: /transcribe now returns timestamped segments
 (not flat text), and /generate-script takes those segments and
 returns the same list with somali_text + version/status fields added
 — this structured list is the Sync Engine's "source of truth" going
-forward (Scene Detection, Motion Analyzer, and Decision Engine all
-build on top of it in later steps).
+forward. /detect-scenes (new) finds shot-cut boundaries with
+PySceneDetect — the client merges scene_id into segments by matching
+each segment's start time against the scene ranges (pure timestamp
+comparison, no AI needed, so it's done client-side for now).
 
 Run:
   pip install -r requirements.txt
@@ -33,6 +36,7 @@ from pydantic import BaseModel
 from services.transcription_service import transcribe
 from services.gemini_service import generate_somali_segments
 from services.tts_service import synthesize
+from services.scene_detection_service import detect_scenes
 
 load_dotenv()
 
@@ -56,6 +60,22 @@ async def transcribe_endpoint(file: UploadFile = File(...)):
     try:
         result = transcribe(temp_path)
         return result
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+@app.post("/detect-scenes")
+async def detect_scenes_endpoint(file: UploadFile = File(...)):
+    temp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{file.filename}")
+    with open(temp_path, "wb") as f:
+        shutil.copyfileobj(file.file, f)
+
+    try:
+        scenes = detect_scenes(temp_path)
+        return {"scenes": scenes}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
