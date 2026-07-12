@@ -2,7 +2,9 @@
 FROM python:3.11-slim
 
 # ffmpeg is needed to extract audio from uploaded videos.
-RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg \
+# libglib2.0-0 is a common missing dependency for opencv-python-headless
+# on minimal Debian images (even the "headless" build sometimes needs it).
+RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libglib2.0-0 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
