@@ -4,3 +4,5 @@ edge-tts>=6.1
 requests>=2.31
 python-multipart>=0.0.9
 python-dotenv>=1.0
+scenedetect>=0.6.4
+opencv-python-headless>=4.9
