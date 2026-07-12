@@ -1,19 +1,10 @@
-
 """
-Transcription via Groq's hosted Whisper Large v3 API — replaces the
-earlier approach of running faster-whisper directly on our own
-server. Why this changed:
+Transcription via Groq's hosted Whisper Large v3 API.
 
-  1. Groq is free (generous limits: 20 req/min, 2000 req/day) and
-     MUCH faster (~228x real-time vs CPU-bound local inference).
-  2. It removes a heavy dependency (faster-whisper + model download)
-     from our backend, so hosting needs less RAM/CPU.
-
-Groq's API accepts video files directly (mp4 is supported), but has
-a 25MB file size limit — real phone videos often exceed that. So we
-still extract just the audio track locally first (ffmpeg, already in
-the Docker image), which is small (a few MB even for a few minutes)
-and well under the limit, then send THAT to Groq.
+CHANGED for Phase 2A: now requests verbose_json to get timestamped
+segments (not just flat text) — the Sync Engine needs per-sentence
+start/end times to build the timeline and align Somali script
+segments to the original video.
 """
 import os
 import subprocess
@@ -29,19 +20,14 @@ os.makedirs(TEMP_DIR, exist_ok=True)
 
 
 def _extract_audio(video_path: str) -> str:
-    """
-    Extracts a small mono 16kHz mp3 audio track from the video using
-    ffmpeg (matches what Whisper models want internally anyway, so
-    pre-downsampling here just makes the upload to Groq smaller/faster).
-    """
     audio_path = os.path.join(TEMP_DIR, f"{uuid.uuid4().hex}.mp3")
     result = subprocess.run(
         [
             "ffmpeg", "-y", "-i", video_path,
-            "-vn",                  # no video
+            "-vn",
             "-acodec", "libmp3lame",
-            "-ar", "16000",         # 16kHz sample rate
-            "-ac", "1",             # mono
+            "-ar", "16000",
+            "-ac", "1",
             "-b:a", "64k",
             audio_path,
         ],
@@ -55,9 +41,15 @@ def _extract_audio(video_path: str) -> str:
 
 def transcribe(video_path: str) -> dict:
     """
-    Returns: {"language": "en", "text": "full transcript ..."}
-    Raises RuntimeError on any failure (missing key, ffmpeg error,
-    Groq API error).
+    Returns:
+        {
+          "language": "en",
+          "segments": [
+            {"start": 0.0, "end": 4.2, "text": "..."},
+            {"start": 4.2, "end": 8.9, "text": "..."}
+          ]
+        }
+    Raises RuntimeError on any failure.
     """
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
@@ -70,7 +62,11 @@ def transcribe(video_path: str) -> dict:
                 _GROQ_URL,
                 headers={"Authorization": f"Bearer {api_key}"},
                 files={"file": (os.path.basename(audio_path), audio_file, "audio/mpeg")},
-                data={"model": _MODEL, "response_format": "json"},
+                data={
+                    "model": _MODEL,
+                    "response_format": "verbose_json",
+                    "timestamp_granularities[]": "segment",
+                },
                 timeout=120,
             )
 
@@ -78,9 +74,17 @@ def transcribe(video_path: str) -> dict:
             raise RuntimeError(f"Groq API error {response.status_code}: {response.text}")
 
         data = response.json()
+        segments = [
+            {
+                "start": round(seg["start"], 2),
+                "end": round(seg["end"], 2),
+                "text": seg["text"].strip(),
+            }
+            for seg in data.get("segments", [])
+        ]
         return {
             "language": data.get("language", "unknown"),
-            "text": data.get("text", "").strip(),
+            "segments": segments,
         }
     finally:
         if os.path.exists(audio_path):
