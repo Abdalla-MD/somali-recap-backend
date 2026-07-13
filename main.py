@@ -37,7 +37,7 @@ from pydantic import BaseModel
 from services.transcription_service import transcribe
 from services.gemini_service import generate_somali_segments
 from services.tts_service import synthesize, get_audio_duration
-from services.scene_detection_service import detect_scenes
+from services.scene_detection_service import detect_scenes, merge_scene_ids
 from services.motion_analyzer import motion_score
 from services.semantic_engine import semantic_scores
 from services.decision_engine import decision_engine
@@ -157,7 +157,21 @@ async def render_endpoint(
         if not segment_list:
             return JSONResponse(status_code=400, content={"error": "segments is empty"})
 
-        # 1. Synthesize each segment's real audio + measure real
+        # 1. Scene Detection — moved here from the fast upload/script
+        #    flow (PySceneDetect is too slow for Render's free-tier
+        #    CPU to run inline with script generation; it belongs
+        #    here anyway since scene_id is only actually needed for
+        #    the Motion Analyzer / Decision Engine below). A slow or
+        #    failed detection here just means no scene_id — it
+        #    doesn't block the render (motion/decision still work
+        #    off segment start/end directly).
+        try:
+            scenes = detect_scenes(temp_video_path)
+            segment_list = merge_scene_ids(segment_list, scenes)
+        except Exception as e:
+            print(f"Scene detection failed (non-fatal): {e}")
+
+        # 2. Synthesize each segment's real audio + measure real
         #    voice duration (Voice Duration Analyzer).
         segment_audio_paths = {}
         for seg in segment_list:
@@ -165,7 +179,7 @@ async def render_endpoint(
             segment_audio_paths[seg["segment_id"]] = audio_path
             seg["voice_duration"] = get_audio_duration(audio_path)
 
-        # 2. Motion Analyzer — per segment's own time range.
+        # 3. Motion Analyzer — per segment's own time range.
         for seg in segment_list:
             try:
                 seg["motion_score_value"] = motion_score(temp_video_path, seg["start"], seg["end"])
@@ -176,7 +190,7 @@ async def render_endpoint(
                 # unmodified by the motion override.
                 seg["motion_score_value"] = 0.0
 
-        # 3. Semantic Engine — batched, one Gemini call for all
+        # 4. Semantic Engine — batched, one Gemini call for all
         #    segments rather than one call each.
         try:
             sem_scores = semantic_scores([
@@ -193,7 +207,7 @@ async def render_endpoint(
             # everything for review incorrectly.
             sem_scores = {}
 
-        # 4. Decision Engine — combines Rule Engine + Motion + Semantic.
+        # 5. Decision Engine — combines Rule Engine + Motion + Semantic.
         decided_segments = []
         for seg in segment_list:
             decision = decision_engine(
@@ -203,7 +217,7 @@ async def render_endpoint(
             )
             decided_segments.append({**seg, **decision})
 
-        # 5. FFmpeg Render — Cinematic Freeze Engine + final assembly.
+        # 6. FFmpeg Render — Cinematic Freeze Engine + final assembly.
         final_path = render_final_video(temp_video_path, decided_segments, segment_audio_paths)
 
         return FileResponse(
