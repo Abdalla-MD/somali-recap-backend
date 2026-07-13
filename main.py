@@ -31,7 +31,6 @@ import uuid
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
@@ -47,17 +46,6 @@ from services.ffmpeg_render_service import render_final_video
 load_dotenv()
 
 app = FastAPI(title="Somali Recap AI Studio - Backend (Phase 2A)")
-
-# Allow the Flutter web app (and any other client) to call this API
-# from a different origin. Without this, browsers block every request
-# with an OPTIONS preflight failure (405) before the real POST is sent.
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],       # tighten to your real domain(s) once you have one
-    allow_credentials=False,   # must be False when allow_origins=["*"]
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
