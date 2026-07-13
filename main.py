@@ -32,7 +32,7 @@ import uuid
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
-from fastapi.middleware.cors import CORSMiddleware  # WAXAA LA KU DARAY CORS
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 from services.transcription_service import transcribe
@@ -48,17 +48,14 @@ load_dotenv()
 
 app = FastAPI(title="Somali Recap AI Studio - Backend (Phase 2A)")
 
-# ------------------------------------------------------------------
-# WAXAA LA HAGAAGIYAY: Habaynta CORS si loo xalliyo ciladda OPTIONS 405
-# ------------------------------------------------------------------
+# Habaynta CORS si looga fogaado ciladaha biraawsarka (Cross-Origin Requests)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Wuxuu oggolaanayaa http://localhost iyo biraawsar kasta
+    allow_origins=["*"],
     allow_credentials=True,
-    allow_methods=["*"],  # Tani waxay si gaar ah u oggolaanaysaa OPTIONS iyo POST
-    allow_headers=["*"],  # Wuxuu oggolaanayaa dhammaan madax-qoraalka (Headers-ka)
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
-# ------------------------------------------------------------------
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -149,18 +146,6 @@ async def render_endpoint(
     speed: float = Form(1.0),
     pitch: float = Form(0.0),
 ):
-    """
-    The full Sync Engine + Freeze Engine + FFmpeg pipeline, tied
-    together. `segments` is a JSON string (the structured segment
-    list Flutter already built via /transcribe + /detect-scenes +
-    /generate-script), each with segment_id/original_text/
-    somali_text/start/end/scene_id.
-
-    Steps: synthesize each segment's real audio -> measure real
-    voice_duration (ffprobe) -> motion score (OpenCV) -> semantic
-    score (Gemini, batched) -> Decision Engine (Rule + AI combined)
-    -> FFmpeg render (trim + freeze/zoom/shake + audio) -> final MP4.
-    """
     temp_video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{file.filename}")
     with open(temp_video_path, "wb") as f:
         shutil.copyfileobj(file.file, f)
@@ -170,28 +155,28 @@ async def render_endpoint(
         if not segment_list:
             return JSONResponse(status_code=400, content={"error": "segments is empty"})
 
-        # 1. Scene Detection — moved here from the fast upload/script
+        # 1. Scene Detection
         try:
             scenes = detect_scenes(temp_video_path)
             segment_list = merge_scene_ids(segment_list, scenes)
         except Exception as e:
             print(f"Scene detection failed (non-fatal): {e}")
 
-        # 2. Synthesize each segment's real audio + measure real
+        # 2. Synthesize each segment's real audio
         segment_audio_paths = {}
         for seg in segment_list:
             audio_path = await synthesize(seg["somali_text"], voice, speed, pitch)
             segment_audio_paths[seg["segment_id"]] = audio_path
             seg["voice_duration"] = get_audio_duration(audio_path)
 
-        # 3. Motion Analyzer — per segment's own time range.
+        # 3. Motion Analyzer
         for seg in segment_list:
             try:
                 seg["motion_score_value"] = motion_score(temp_video_path, seg["start"], seg["end"])
             except Exception:
                 seg["motion_score_value"] = 0.0
 
-        # 4. Semantic Engine — batched, one Gemini call for all
+        # 4. Semantic Engine — HAGAAGSAN! (Laga saaray wixii syntax error ah)
         try:
             sem_scores = semantic_scores([
                 {
@@ -199,12 +184,12 @@ async def render_endpoint(
                     "original_text": s["original_text"],
                     "somali_text": s["somali_text"],
                 }
-                : for s in segment_list
+                for s in segment_list
             ])
         except Exception:
             sem_scores = {}
 
-        # 5. Decision Engine — combines Rule Engine + Motion + Semantic.
+        # 5. Decision Engine
         decided_segments = []
         for seg in segment_list:
             decision = decision_engine(
@@ -214,7 +199,7 @@ async def render_endpoint(
             )
             decided_segments.append({**seg, **decision})
 
-        # 6. FFmpeg Render — Cinematic Freeze Engine + final assembly.
+        # 6. FFmpeg Render
         final_path = render_final_video(temp_video_path, decided_segments, segment_audio_paths)
 
         return FileResponse(
