@@ -32,6 +32,7 @@ import uuid
 from dotenv import load_dotenv
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.cors import CORSMiddleware  # WAXAA LA KU DARAY CORS
 from pydantic import BaseModel
 
 from services.transcription_service import transcribe
@@ -46,6 +47,18 @@ from services.ffmpeg_render_service import render_final_video
 load_dotenv()
 
 app = FastAPI(title="Somali Recap AI Studio - Backend (Phase 2A)")
+
+# ------------------------------------------------------------------
+# WAXAA LA HAGAAGIYAY: Habaynta CORS si loo xalliyo ciladda OPTIONS 405
+# ------------------------------------------------------------------
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Wuxuu oggolaanayaa http://localhost iyo biraawsar kasta
+    allow_credentials=True,
+    allow_methods=["*"],  # Tani waxay si gaar ah u oggolaanaysaa OPTIONS iyo POST
+    allow_headers=["*"],  # Wuxuu oggolaanayaa dhammaan madax-qoraalka (Headers-ka)
+)
+# ------------------------------------------------------------------
 
 UPLOAD_DIR = "uploads"
 os.makedirs(UPLOAD_DIR, exist_ok=True)
@@ -158,13 +171,6 @@ async def render_endpoint(
             return JSONResponse(status_code=400, content={"error": "segments is empty"})
 
         # 1. Scene Detection — moved here from the fast upload/script
-        #    flow (PySceneDetect is too slow for Render's free-tier
-        #    CPU to run inline with script generation; it belongs
-        #    here anyway since scene_id is only actually needed for
-        #    the Motion Analyzer / Decision Engine below). A slow or
-        #    failed detection here just means no scene_id — it
-        #    doesn't block the render (motion/decision still work
-        #    off segment start/end directly).
         try:
             scenes = detect_scenes(temp_video_path)
             segment_list = merge_scene_ids(segment_list, scenes)
@@ -172,7 +178,6 @@ async def render_endpoint(
             print(f"Scene detection failed (non-fatal): {e}")
 
         # 2. Synthesize each segment's real audio + measure real
-        #    voice duration (Voice Duration Analyzer).
         segment_audio_paths = {}
         for seg in segment_list:
             audio_path = await synthesize(seg["somali_text"], voice, speed, pitch)
@@ -184,14 +189,9 @@ async def render_endpoint(
             try:
                 seg["motion_score_value"] = motion_score(temp_video_path, seg["start"], seg["end"])
             except Exception:
-                # A motion-analysis failure shouldn't block the whole
-                # render — fall back to "assume static" (0), which
-                # just means the Rule Engine's freeze decision stands
-                # unmodified by the motion override.
                 seg["motion_score_value"] = 0.0
 
         # 4. Semantic Engine — batched, one Gemini call for all
-        #    segments rather than one call each.
         try:
             sem_scores = semantic_scores([
                 {
@@ -199,12 +199,9 @@ async def render_endpoint(
                     "original_text": s["original_text"],
                     "somali_text": s["somali_text"],
                 }
-                for s in segment_list
+                : for s in segment_list
             ])
         except Exception:
-            # If semantic scoring fails, default everyone to "OK"
-            # (100) rather than blocking the render or flagging
-            # everything for review incorrectly.
             sem_scores = {}
 
         # 5. Decision Engine — combines Rule Engine + Motion + Semantic.
