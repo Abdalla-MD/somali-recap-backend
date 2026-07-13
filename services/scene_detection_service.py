@@ -29,3 +29,25 @@ def detect_scenes(video_path: str) -> list:
             "end": round(end_tc.get_seconds(), 2),
         })
     return scenes
+
+
+def merge_scene_ids(segments: list, scenes: list) -> list:
+    """
+    Assigns scene_id to each segment by matching its start time
+    against the detected scene ranges. Pure timestamp comparison —
+    Rule Engine territory, not AI. Mirrors scene_merge.dart's logic
+    (kept in sync deliberately — this now runs server-side inside
+    /render instead of blocking the fast script-generation flow on
+    Render's limited free-tier CPU).
+    """
+    if not scenes:
+        return segments
+
+    for seg in segments:
+        matching = next(
+            (s for s in scenes if s["start"] <= seg["start"] < s["end"]),
+            scenes[-1],
+        )
+        seg["scene_id"] = matching["scene_id"]
+
+    return segments
