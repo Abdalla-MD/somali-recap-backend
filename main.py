@@ -1,21 +1,25 @@
 """
-Somali Recap AI Studio — Phase 2A backend.
+Somali Recap AI Studio — Phase 2A backend (CPU-optimized for
+Render.com's free tier).
 
 Endpoints:
   GET  /health
   POST /transcribe        (multipart video file -> {language, segments})
-  POST /detect-scenes     (multipart video file -> {scenes})
   POST /generate-script    (JSON {segments} -> {segments} with somali_text)
   POST /synthesize-voice   (JSON {text, voice, speed, pitch} -> mp3 file)
+  POST /render             (multipart video + segments JSON -> final MP4)
 
 CHANGED for Phase 2A: /transcribe now returns timestamped segments
 (not flat text), and /generate-script takes those segments and
 returns the same list with somali_text + version/status fields added
-— this structured list is the Sync Engine's "source of truth" going
-forward. /detect-scenes (new) finds shot-cut boundaries with
-PySceneDetect — the client merges scene_id into segments by matching
-each segment's start time against the scene ranges (pure timestamp
-comparison, no AI needed, so it's done client-side for now).
+— this structured list is the Sync Engine's "source of truth".
+
+REMOVED (deliberately): Scene Detection (PySceneDetect) and the
+/detect-scenes endpoint. It scanned every frame of the video (3-5+
+minutes on Render's 0.1 CPU free tier for a 10-min 1080p video) but
+the Decision Engine never actually used scene_id in its logic — pure
+CPU cost with no payoff. scene_detection_service.py is kept in the
+repo but unused, in case a real need for it comes up later.
 
 Run:
   pip install -r requirements.txt
@@ -37,7 +41,6 @@ from pydantic import BaseModel
 from services.transcription_service import transcribe
 from services.gemini_service import generate_somali_segments
 from services.tts_service import synthesize, get_audio_duration
-from services.scene_detection_service import detect_scenes, merge_scene_ids
 from services.motion_analyzer import motion_score
 from services.semantic_engine import semantic_scores
 from services.decision_engine import decision_engine
@@ -65,22 +68,6 @@ async def transcribe_endpoint(file: UploadFile = File(...)):
     try:
         result = transcribe(temp_path)
         return result
-    except Exception as e:
-        return JSONResponse(status_code=500, content={"error": str(e)})
-    finally:
-        if os.path.exists(temp_path):
-            os.remove(temp_path)
-
-
-@app.post("/detect-scenes")
-async def detect_scenes_endpoint(file: UploadFile = File(...)):
-    temp_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{file.filename}")
-    with open(temp_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-
-    try:
-        scenes = detect_scenes(temp_path)
-        return {"scenes": scenes}
     except Exception as e:
         return JSONResponse(status_code=500, content={"error": str(e)})
     finally:
@@ -139,9 +126,8 @@ async def render_endpoint(
     """
     The full Sync Engine + Freeze Engine + FFmpeg pipeline, tied
     together. `segments` is a JSON string (the structured segment
-    list Flutter already built via /transcribe + /detect-scenes +
-    /generate-script), each with segment_id/original_text/
-    somali_text/start/end/scene_id.
+    list Flutter already built via /transcribe + /generate-script),
+    each with segment_id/original_text/somali_text/start/end.
 
     Steps: synthesize each segment's real audio -> measure real
     voice_duration (ffprobe) -> motion score (OpenCV) -> semantic
@@ -157,21 +143,16 @@ async def render_endpoint(
         if not segment_list:
             return JSONResponse(status_code=400, content={"error": "segments is empty"})
 
-        # 1. Scene Detection — moved here from the fast upload/script
-        #    flow (PySceneDetect is too slow for Render's free-tier
-        #    CPU to run inline with script generation; it belongs
-        #    here anyway since scene_id is only actually needed for
-        #    the Motion Analyzer / Decision Engine below). A slow or
-        #    failed detection here just means no scene_id — it
-        #    doesn't block the render (motion/decision still work
-        #    off segment start/end directly).
-        try:
-            scenes = detect_scenes(temp_video_path)
-            segment_list = merge_scene_ids(segment_list, scenes)
-        except Exception as e:
-            print(f"Scene detection failed (non-fatal): {e}")
+        # NOTE: Scene Detection (PySceneDetect) was removed from here.
+        # It was pure CPU cost with no actual payoff — the Decision
+        # Engine below never used scene_id for its logic (motion
+        # score is already computed directly on each segment's own
+        # start/end range). On Render's free tier (0.1 CPU),
+        # PySceneDetect scanning every frame of a 10-min 1080p video
+        # could take 3-5+ minutes on its own — removing it is the
+        # single biggest render-time win available.
 
-        # 2. Synthesize each segment's real audio + measure real
+        # 1. Synthesize each segment's real audio + measure real
         #    voice duration (Voice Duration Analyzer).
         segment_audio_paths = {}
         for seg in segment_list:
@@ -179,7 +160,7 @@ async def render_endpoint(
             segment_audio_paths[seg["segment_id"]] = audio_path
             seg["voice_duration"] = get_audio_duration(audio_path)
 
-        # 3. Motion Analyzer — per segment's own time range.
+        # 2. Motion Analyzer — per segment's own time range.
         for seg in segment_list:
             try:
                 seg["motion_score_value"] = motion_score(temp_video_path, seg["start"], seg["end"])
@@ -190,7 +171,7 @@ async def render_endpoint(
                 # unmodified by the motion override.
                 seg["motion_score_value"] = 0.0
 
-        # 4. Semantic Engine — batched, one Gemini call for all
+        # 3. Semantic Engine — batched, one Gemini call for all
         #    segments rather than one call each.
         try:
             sem_scores = semantic_scores([
@@ -207,7 +188,7 @@ async def render_endpoint(
             # everything for review incorrectly.
             sem_scores = {}
 
-        # 5. Decision Engine — combines Rule Engine + Motion + Semantic.
+        # 4. Decision Engine — combines Rule Engine + Motion + Semantic.
         decided_segments = []
         for seg in segment_list:
             decision = decision_engine(
@@ -217,7 +198,7 @@ async def render_endpoint(
             )
             decided_segments.append({**seg, **decision})
 
-        # 6. FFmpeg Render — Cinematic Freeze Engine + final assembly.
+        # 5. FFmpeg Render — Cinematic Freeze Engine + final assembly.
         final_path = render_final_video(temp_video_path, decided_segments, segment_audio_paths)
 
         return FileResponse(
