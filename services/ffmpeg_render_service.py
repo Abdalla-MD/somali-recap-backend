@@ -25,6 +25,11 @@ _CANONICAL_WIDTH = 1280
 _CANONICAL_HEIGHT = 720
 _CANONICAL_FPS = 25
 
+# "ultrafast" instead of "fast" — trades a slightly larger output file
+# for 3-5x faster encoding, which matters a lot on Render's free-tier
+# 0.1 CPU. Combined with removing Scene Detection, this is the fix
+# for renders timing out / OOM-crashing on the free tier.
+
 
 def _run(cmd: list):
     result = subprocess.run(cmd, capture_output=True, text=True)
@@ -56,7 +61,7 @@ def _trim_and_normalize(video_path: str, start: float, end: float, out_path: str
         "ffmpeg", "-y", "-i", video_path,
         "-ss", str(start), "-to", str(end),
         "-an", "-vf", scale_pad,
-        "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+        "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
         out_path,
     ])
 
@@ -84,7 +89,7 @@ def _freeze_extension(source_clip_path: str, duration: float, out_path: str):
             "ffmpeg", "-y", "-loop", "1", "-i", frame_path,
             "-vf", zoompan,
             "-t", str(duration),
-            "-c:v", "libx264", "-preset", "fast", "-crf", "23",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
             out_path,
         ])
     finally:
@@ -113,12 +118,12 @@ def _concat_videos(video_paths: list, out_path: str, has_audio: bool = False):
         stream_refs = "".join(f"[{i}:v:0][{i}:a:0]" for i in range(len(video_paths)))
         filter_complex = f"{stream_refs}concat=n={len(video_paths)}:v=1:a=1[outv][outa]"
         map_args = ["-map", "[outv]", "-map", "[outa]"]
-        codec_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23", "-c:a", "aac"]
+        codec_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-c:a", "aac"]
     else:
         stream_refs = "".join(f"[{i}:v:0]" for i in range(len(video_paths)))
         filter_complex = f"{stream_refs}concat=n={len(video_paths)}:v=1:a=0[outv]"
         map_args = ["-map", "[outv]"]
-        codec_args = ["-c:v", "libx264", "-preset", "fast", "-crf", "23"]
+        codec_args = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "23"]
 
     _run(["ffmpeg", "-y", *inputs, "-filter_complex", filter_complex, *map_args, *codec_args, out_path])
 
