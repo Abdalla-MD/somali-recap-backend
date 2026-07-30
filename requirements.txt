@@ -4,5 +4,9 @@ edge-tts>=6.1
 requests>=2.31
 python-multipart>=0.0.9
 python-dotenv>=1.0
-scenedetect>=0.6.4
-opencv-python-headless>=4.9
+# scenedetect and opencv-python-headless removed — no longer used by
+# /render (simple audio-overlay mode). If you reactivate the full
+# Sync Engine (ffmpeg_render_service.py, motion_analyzer.py,
+# scene_detection_service.py) later on a more capable VPS, add back:
+#   scenedetect>=0.6.4
+#   opencv-python-headless>=4.9
