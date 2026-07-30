@@ -40,11 +40,8 @@ from pydantic import BaseModel
 
 from services.transcription_service import transcribe
 from services.gemini_service import generate_somali_segments
-from services.tts_service import synthesize, get_audio_duration
-from services.motion_analyzer import motion_score
-from services.semantic_engine import semantic_scores
-from services.decision_engine import decision_engine
-from services.ffmpeg_render_service import render_final_video
+from services.tts_service import synthesize
+from services.simple_render_service import render_simple_video
 
 load_dotenv()
 
@@ -124,15 +121,14 @@ async def render_endpoint(
     pitch: float = Form(0.0),
 ):
     """
-    The full Sync Engine + Freeze Engine + FFmpeg pipeline, tied
-    together. `segments` is a JSON string (the structured segment
-    list Flutter already built via /transcribe + /generate-script),
-    each with segment_id/original_text/somali_text/start/end.
-
-    Steps: synthesize each segment's real audio -> measure real
-    voice_duration (ffprobe) -> motion score (OpenCV) -> semantic
-    score (Gemini, batched) -> Decision Engine (Rule + AI combined)
-    -> FFmpeg render (trim + freeze/zoom/shake + audio) -> final MP4.
+    SIMPLE MODE (current, per Abdalla): synthesizes each segment's
+    audio, concatenates it into one narration track, and overlays it
+    onto the ORIGINAL video with no re-encoding (-c:v copy). No trim,
+    no freeze/zoom, no motion/semantic/decision analysis — those are
+    parked (see simple_render_service.py's docstring) for when a more
+    capable VPS is available. This is deliberately the lightest
+    possible version that still produces a real dubbed video, sized
+    to actually run on Render's free tier.
     """
     temp_video_path = os.path.join(UPLOAD_DIR, f"{uuid.uuid4().hex}_{file.filename}")
     with open(temp_video_path, "wb") as f:
@@ -143,63 +139,15 @@ async def render_endpoint(
         if not segment_list:
             return JSONResponse(status_code=400, content={"error": "segments is empty"})
 
-        # NOTE: Scene Detection (PySceneDetect) was removed from here.
-        # It was pure CPU cost with no actual payoff — the Decision
-        # Engine below never used scene_id for its logic (motion
-        # score is already computed directly on each segment's own
-        # start/end range). On Render's free tier (0.1 CPU),
-        # PySceneDetect scanning every frame of a 10-min 1080p video
-        # could take 3-5+ minutes on its own — removing it is the
-        # single biggest render-time win available.
-
-        # 1. Synthesize each segment's real audio + measure real
-        #    voice duration (Voice Duration Analyzer).
+        # Synthesize each segment's real audio (edge-tts).
         segment_audio_paths = {}
         for seg in segment_list:
             audio_path = await synthesize(seg["somali_text"], voice, speed, pitch)
             segment_audio_paths[seg["segment_id"]] = audio_path
-            seg["voice_duration"] = get_audio_duration(audio_path)
 
-        # 2. Motion Analyzer — per segment's own time range.
-        for seg in segment_list:
-            try:
-                seg["motion_score_value"] = motion_score(temp_video_path, seg["start"], seg["end"])
-            except Exception:
-                # A motion-analysis failure shouldn't block the whole
-                # render — fall back to "assume static" (0), which
-                # just means the Rule Engine's freeze decision stands
-                # unmodified by the motion override.
-                seg["motion_score_value"] = 0.0
-
-        # 3. Semantic Engine — batched, one Gemini call for all
-        #    segments rather than one call each.
-        try:
-            sem_scores = semantic_scores([
-                {
-                    "segment_id": s["segment_id"],
-                    "original_text": s["original_text"],
-                    "somali_text": s["somali_text"],
-                }
-                for s in segment_list
-            ])
-        except Exception:
-            # If semantic scoring fails, default everyone to "OK"
-            # (100) rather than blocking the render or flagging
-            # everything for review incorrectly.
-            sem_scores = {}
-
-        # 4. Decision Engine — combines Rule Engine + Motion + Semantic.
-        decided_segments = []
-        for seg in segment_list:
-            decision = decision_engine(
-                seg,
-                motion_score=seg.get("motion_score_value", 0.0),
-                semantic_score=sem_scores.get(seg["segment_id"], 100.0),
-            )
-            decided_segments.append({**seg, **decision})
-
-        # 5. FFmpeg Render — Cinematic Freeze Engine + final assembly.
-        final_path = render_final_video(temp_video_path, decided_segments, segment_audio_paths)
+        # Concatenate audio + overlay onto the original video, no
+        # video re-encoding at all.
+        final_path = render_simple_video(temp_video_path, segment_list, segment_audio_paths)
 
         return FileResponse(
             final_path,
