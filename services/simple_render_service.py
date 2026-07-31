@@ -82,6 +82,13 @@ def render_simple_video(video_path: str, segments: list, segment_audio_paths: di
         "ffmpeg", "-y", "-i", video_path, "-i", combined_audio,
         "-map", "0:v", "-map", "1:a",
         "-c:v", "copy", "-c:a", "aac",
+        # +faststart moves the MP4's metadata (moov atom) to the
+        # front of the file — without this, some players (including
+        # Flutter's video_player on certain devices) can stall video
+        # playback while audio keeps running, since the player has to
+        # find metadata at the end of the file before it can properly
+        # seek/render frames. Cheap fix, no re-encoding needed.
+        "-movflags", "+faststart",
         "-shortest",
         final_output,
     ])
