@@ -53,15 +53,39 @@ def _concat_audio(audio_paths: list, out_path: str):
             os.remove(list_file)
 
 
+def _get_duration(path: str) -> float:
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", path],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        raise RuntimeError(f"ffprobe failed on {path}: {result.stderr}")
+    return float(result.stdout.strip())
+
+
 def render_simple_video(video_path: str, segments: list, segment_audio_paths: dict) -> str:
     """
     segments: ordered list of segment dicts (just needs segment_id,
         in narration order — same order the segments were generated).
     segment_audio_paths: {segment_id: path_to_synthesized_mp3}
 
-    Returns the path to the final MP4: original video, audio track
-    replaced by the concatenated Somali narration. Raises
-    RuntimeError on any ffmpeg failure.
+    Returns the path to the final MP4. Raises RuntimeError on any
+    ffmpeg failure.
+
+    DURATION MATCHING ("Simple Extend Engine"): rather than cutting
+    whichever track is shorter (the old -shortest behavior, which was
+    chopping off narration whenever the Somali audio ran longer than
+    the source video — very common, since Somali translations often
+    take longer to say), this now extends the SHORTER track to match
+    the longer one:
+      - audio longer -> video gets a frozen-last-frame extension
+        (tpad filter) — one re-encode of the whole video, not per
+        segment, so it's still much cheaper than the old pipeline.
+      - video longer -> audio gets silence padding (apad filter) —
+        cheap, audio-only.
+      - close enough (<=1 sec difference) -> no extra encode at all,
+        same -c:v copy fast path as before.
     """
     ordered_audio = [
         segment_audio_paths[seg["segment_id"]]
@@ -77,19 +101,51 @@ def render_simple_video(video_path: str, segments: list, segment_audio_paths: di
         combined_audio = os.path.join(RENDER_DIR, f"combined_{uuid.uuid4().hex}.mp3")
         _concat_audio(ordered_audio, combined_audio)
 
+    video_duration = _get_duration(video_path)
+    audio_duration = _get_duration(combined_audio)
+    diff = audio_duration - video_duration  # positive = audio longer
+
+    video_for_mux = video_path
+    audio_for_mux = combined_audio
+    use_shortest = True
+
+    if diff > 1.0:
+        # Audio meaningfully longer — extend the video by holding its
+        # last frame, so no narration gets cut off. This is the one
+        # case that costs a real re-encode (tpad has to touch the
+        # whole clip), but it's a SINGLE whole-video encode, not
+        # 4-per-segment like the old pipeline.
+        extended_path = os.path.join(RENDER_DIR, f"extended_{uuid.uuid4().hex}.mp4")
+        _run([
+            "ffmpeg", "-y", "-i", video_path,
+            "-vf", f"tpad=stop_mode=clone:stop_duration={diff:.2f}",
+            "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
+            extended_path,
+        ])
+        video_for_mux = extended_path
+        use_shortest = False
+    elif diff < -1.0:
+        # Video meaningfully longer — pad the audio with silence
+        # instead of cutting the video short. Audio-only, cheap.
+        padded_audio_path = os.path.join(RENDER_DIR, f"padded_audio_{uuid.uuid4().hex}.mp3")
+        _run([
+            "ffmpeg", "-y", "-i", combined_audio,
+            "-af", f"apad=pad_dur={abs(diff):.2f}",
+            padded_audio_path,
+        ])
+        audio_for_mux = padded_audio_path
+        use_shortest = False
+    # else: within 1 second — close enough, no extra encode needed.
+
     final_output = os.path.join(RENDER_DIR, f"final_{uuid.uuid4().hex}.mp4")
-    _run([
-        "ffmpeg", "-y", "-i", video_path, "-i", combined_audio,
+    mux_cmd = [
+        "ffmpeg", "-y", "-i", video_for_mux, "-i", audio_for_mux,
         "-map", "0:v", "-map", "1:a",
         "-c:v", "copy", "-c:a", "aac",
-        # +faststart moves the MP4's metadata (moov atom) to the
-        # front of the file — without this, some players (including
-        # Flutter's video_player on certain devices) can stall video
-        # playback while audio keeps running, since the player has to
-        # find metadata at the end of the file before it can properly
-        # seek/render frames. Cheap fix, no re-encoding needed.
         "-movflags", "+faststart",
-        "-shortest",
-        final_output,
-    ])
+    ]
+    if use_shortest:
+        mux_cmd.append("-shortest")
+    mux_cmd.append(final_output)
+    _run(mux_cmd)
     return final_output
