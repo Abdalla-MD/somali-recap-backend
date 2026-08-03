@@ -27,15 +27,16 @@ PROMPT_TEMPLATE = """\
 Waxaad tahay AI kaaliye ku xeel dheer qoritaanka script-yada "movie recap" ee af-Soomaaliga ah.
 
 HAWSHA:
-Hoos waxaa ku qoran liis segments ah (sentences waqti leh) oo ka socda muuqaal. Segment kastaba wuxuu leeyahay segment_id iyo qoraalkiisa asalka ah.
+Hoos waxaa ku qoran liis segments ah (sentences waqti leh) oo ka socda muuqaal. Segment kastaba wuxuu leeyahay segment_id, qoraalkiisa asalka ah, iyo MUDDADA (seconds) uu ku jiro muuqaalka.
 
 Segment kasta u qor SADARKA SOOMAALI AH oo ku habboon (recap-style, gaaban oo dabiici ah, ma aha turjumaad hal-eray-eray ah), adigoo isku daya inaad sii jirto macnaha muhiimka ah.
 
 XEERAR:
 1. Segment kasta waa inuu leeyahay SADARKA SOOMAALI AH oo gaar u ah — ha isku darin laba segment, ha ka boodin segment kasta.
 2. Isticmaal Soomaali fudud, caadi ah.
-3. Soo celi JSON OO KELIYA — array leh {{"segment_id": N, "somali_text": "..."}} — ha ku darin qoraal kale, cinwaan, ama markdown fences (```).
-4. Tirada segments-ka soo celiyaa waa inay la mid tahay tirada segments-ka la siiyay.
+3. MUHIIM — DHERERKA: erayada aad qorto waa inay ku filan yihiin in lagu dhawaaqo MUDDADA la siiyay segment-kaas (qiyaas ahaan 2.3 eray/ilbiriqsi Soomaali ah). Tusaale: haddii muddadu tahay 3 ilbiriqsi, u qor ~6-7 eray oo keliya — ha u qorin sentence dheer oo ka baxsan waqtigaas, xitaa haddii macnaha asalka ahi uu ka dheer yahay. Kooban oo sax ah ayaa ka wanaagsan mid dheer oo dhamaystiran.
+4. Soo celi JSON OO KELIYA — array leh {{"segment_id": N, "somali_text": "..."}} — ha ku darin qoraal kale, cinwaan, ama markdown fences (```).
+5. Tirada segments-ka soo celiyaa waa inay la mid tahay tirada segments-ka la siiyay.
 
 SEGMENTS-KA ASALKA AH:
 {segments_list}
@@ -45,7 +46,8 @@ SEGMENTS-KA ASALKA AH:
 def _build_segments_list_text(segments: list) -> str:
     lines = []
     for seg in segments:
-        lines.append(f'{seg["segment_id"]}. {seg["original_text"]}')
+        duration = round(seg["end"] - seg["start"], 1)
+        lines.append(f'{seg["segment_id"]}. [{duration}s] {seg["original_text"]}')
     return "\n".join(lines)
 
 
