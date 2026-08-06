@@ -73,19 +73,20 @@ def render_simple_video(video_path: str, segments: list, segment_audio_paths: di
     Returns the path to the final MP4. Raises RuntimeError on any
     ffmpeg failure.
 
-    DURATION MATCHING ("Simple Extend Engine"): rather than cutting
-    whichever track is shorter (the old -shortest behavior, which was
-    chopping off narration whenever the Somali audio ran longer than
-    the source video — very common, since Somali translations often
-    take longer to say), this now extends the SHORTER track to match
-    the longer one:
-      - audio longer -> video gets a frozen-last-frame extension
-        (tpad filter) — one re-encode of the whole video, not per
-        segment, so it's still much cheaper than the old pipeline.
-      - video longer -> audio gets silence padding (apad filter) —
-        cheap, audio-only.
-      - close enough (<=1 sec difference) -> no extra encode at all,
-        same -c:v copy fast path as before.
+    "GLOBAL SPEED MATCH" ENGINE (per Abdalla's request): instead of
+    freezing/padding to cover a duration gap, the whole video's
+    playback speed is scaled ONCE (via the setpts filter) so its
+    total duration exactly matches the narration's total duration.
+    Shorter audio -> video plays a bit faster. Longer audio -> video
+    plays a bit slower. This is a single whole-video encode — no
+    per-segment work, no freeze-frame generation, no concat — simpler
+    and cheaper than the earlier "Simple Extend Engine".
+
+    The speed factor is clamped to 0.6-1.8x so a very large mismatch
+    doesn't produce an absurdly fast/slow, unwatchable result — if
+    the natural factor falls outside that range, it's clamped and a
+    small residual duration mismatch is accepted (handled by
+    -shortest as a safety net, same as before).
     """
     ordered_audio = [
         segment_audio_paths[seg["segment_id"]]
@@ -103,49 +104,37 @@ def render_simple_video(video_path: str, segments: list, segment_audio_paths: di
 
     video_duration = _get_duration(video_path)
     audio_duration = _get_duration(combined_audio)
-    diff = audio_duration - video_duration  # positive = audio longer
 
-    video_for_mux = video_path
-    audio_for_mux = combined_audio
-    use_shortest = True
+    raw_factor = audio_duration / video_duration if video_duration > 0 else 1.0
+    speed_factor = max(0.6, min(1.8, raw_factor))
 
-    if diff > 1.0:
-        # Audio meaningfully longer — extend the video by holding its
-        # last frame, so no narration gets cut off. This is the one
-        # case that costs a real re-encode (tpad has to touch the
-        # whole clip), but it's a SINGLE whole-video encode, not
-        # 4-per-segment like the old pipeline.
-        extended_path = os.path.join(RENDER_DIR, f"extended_{uuid.uuid4().hex}.mp4")
+    if abs(speed_factor - 1.0) < 0.02:
+        # Close enough already — skip the re-encode entirely, stay
+        # on the cheap -c:v copy path.
+        video_for_mux = video_path
+    else:
+        adjusted_path = os.path.join(RENDER_DIR, f"speedmatch_{uuid.uuid4().hex}.mp4")
         _run([
             "ffmpeg", "-y", "-i", video_path,
-            "-vf", f"tpad=stop_mode=clone:stop_duration={diff:.2f}",
+            "-vf", f"setpts={speed_factor:.4f}*PTS",
+            "-an",  # original audio isn't used anyway — replaced with the Somali narration
             "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23",
-            extended_path,
+            adjusted_path,
         ])
-        video_for_mux = extended_path
-        use_shortest = False
-    elif diff < -1.0:
-        # Video meaningfully longer — pad the audio with silence
-        # instead of cutting the video short. Audio-only, cheap.
-        padded_audio_path = os.path.join(RENDER_DIR, f"padded_audio_{uuid.uuid4().hex}.mp3")
-        _run([
-            "ffmpeg", "-y", "-i", combined_audio,
-            "-af", f"apad=pad_dur={abs(diff):.2f}",
-            padded_audio_path,
-        ])
-        audio_for_mux = padded_audio_path
-        use_shortest = False
-    # else: within 1 second — close enough, no extra encode needed.
+        video_for_mux = adjusted_path
 
     final_output = os.path.join(RENDER_DIR, f"final_{uuid.uuid4().hex}.mp4")
-    mux_cmd = [
-        "ffmpeg", "-y", "-i", video_for_mux, "-i", audio_for_mux,
+    _run([
+        "ffmpeg", "-y", "-i", video_for_mux, "-i", combined_audio,
         "-map", "0:v", "-map", "1:a",
-        "-c:v", "copy", "-c:a", "aac",
+        # video_for_mux is already a complete, properly-encoded file
+        # by this point either way (either untouched original, or
+        # already re-encoded once by the setpts step above) — copy
+        # here always, re-encoding it again would be wasted work.
+        "-c:v", "copy",
+        "-c:a", "aac",
         "-movflags", "+faststart",
-    ]
-    if use_shortest:
-        mux_cmd.append("-shortest")
-    mux_cmd.append(final_output)
-    _run(mux_cmd)
+        "-shortest",
+        final_output,
+    ])
     return final_output
